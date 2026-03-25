@@ -14,7 +14,7 @@ type User = { role: UserRole; name: string } | null;
 
 // 연락처 자동 하이픈 생성 및 숫자만 입력받는 함수
 const formatPhoneNumber = (value: string) => {
-  const numbers = value.replace(/[^\d]/g, ''); // 숫자만 남기기
+  const numbers = value.replace(/[^\d]/g, ''); 
   if (numbers.length <= 3) return numbers;
   if (numbers.length <= 7) return `${numbers.slice(0, 3)}-${numbers.slice(3)}`;
   return `${numbers.slice(0, 3)}-${numbers.slice(3, 7)}-${numbers.slice(7, 11)}`;
@@ -44,6 +44,7 @@ export default function App() {
     fetchData();
   }, []);
 
+  // 총 예약된 좌석 수 (취소/환불 포함하여 카운트 -> 관리자가 수동으로 대기자 처리)
   const totalReservedSeats = applications.reduce((total, app) => total + 1 + (app.companion_count || 0), 0);
 
   const handleLogin = (role: UserRole, name: string) => {
@@ -58,11 +59,12 @@ export default function App() {
 
   // 3. DB에 탑승 신청 데이터 저장하기
   const submitApplication = async (applicationData: any) => {
-    const isWaiting = totalReservedSeats >= schedule.maxSeats; // 꽉 찼으면 자동 대기자
+    // 수정: DB 컬럼명인 max_seats로 변경
+    const isWaiting = totalReservedSeats >= schedule.max_seats; 
     
-    // 일반 신청인데 빈자리가 부족한 경우 방지 (예: 43명 신청완료인데 2명이 동시 신청하는 경우 대비)
-    if (!isWaiting && totalReservedSeats + 1 + applicationData.companions.length > schedule.maxSeats) {
-        alert(`현재 잔여 좌석이 ${schedule.maxSeats - totalReservedSeats}석밖에 남지 않아 신청 인원 전체가 대기자로 넘어갑니다.`);
+    // 일반 신청인데 빈자리가 부족한 경우 방지
+    if (!isWaiting && totalReservedSeats + 1 + applicationData.companions.length > schedule.max_seats) {
+        alert(`현재 잔여 좌석이 ${schedule.max_seats - totalReservedSeats}석밖에 남지 않아 신청 인원 전체가 대기자로 넘어갑니다.`);
     }
 
     const insertData = {
@@ -76,8 +78,8 @@ export default function App() {
       companions_info: applicationData.companions,
       is_minor: applicationData.isMinor,
       guardian_phone: applicationData.guardianPhone,
-      refund_account: applicationData.refundAccount || null, // 대기자가 아니면 null
-      is_waiting: totalReservedSeats >= schedule.maxSeats,
+      refund_account: applicationData.refundAccount || null,
+      is_waiting: totalReservedSeats >= schedule.max_seats, // 수정됨
       status: '입금대기'
     };
 
@@ -86,7 +88,7 @@ export default function App() {
     if (error) {
       alert('오류가 발생했습니다: ' + error.message);
     } else {
-      alert(insertData.is_waiting ? '정원이 초과되어 [대기자]로 신청되었습니다. 추가 배차 확정 시 안내해 드립니다.' : '신청이 완료되었습니다!');
+      alert(insertData.is_waiting ? '정원이 마감되어 [대기자]로 신청되었습니다. 추가 배차 확정 시 안내해 드립니다.' : '신청이 완료되었습니다!');
       fetchData();
       setView('home');
     }
@@ -98,7 +100,7 @@ export default function App() {
   };
 
   const deleteApplication = async (id: string) => {
-    if(window.confirm('정말 이 신청을 취소/삭제 하시겠습니까?')) {
+    if(window.confirm('정말 이 신청을 DB에서 완전 삭제하시겠습니까? (좌석이 1자리 비게 됩니다)')) {
       await supabase.from('reservations').delete().eq('id', id);
       fetchData();
     }
@@ -162,7 +164,8 @@ export default function App() {
 // ================== 컴포넌트 분리 ==================
 
 function UserHome({ schedule, reservedSeats, onApplyClick, currentUser, applications, onCancelRequest }: any) {
-  const isSoldOut = reservedSeats >= schedule.maxSeats;
+  // 수정: DB 컬럼명인 max_seats로 변경
+  const isSoldOut = reservedSeats >= schedule.max_seats; 
   const myApplications = applications.filter((app: any) => app.user_id === currentUser.name);
 
   return (
@@ -173,14 +176,16 @@ function UserHome({ schedule, reservedSeats, onApplyClick, currentUser, applicat
           <li><strong>환불 규정:</strong> 24시간 이내 100% / 탑승문자 발송 전 50% / 출발 3일 전 환불불가</li>
           <li>탑승자 식별을 위해 <strong>개인 양도는 절대 불가</strong>합니다.</li>
           <li>미성년자는 신청 시 보호자 연락처를 반드시 기재해야 합니다.</li>
-          <li>인원 초과 시 대기자로 등록되며, 배차 취소 시 100% 환불됩니다.</li>
+          <li>인원 초과 시 대기자로 등록되며, 배차 실패 시 100% 환불됩니다.</li>
         </ul>
       </div>
 
       <div className="bg-white rounded-xl shadow-md overflow-hidden border border-gray-200">
         <div className="bg-black text-white px-6 py-4 flex justify-between items-center border-b-2 border-red-600">
           <h2 className="text-xl font-black tracking-tight">{schedule.title}</h2>
-          <span className={`px-3 py-1 rounded-full text-sm font-bold ${isSoldOut ? 'bg-red-600 text-white' : 'bg-white text-red-600'}`}>{isSoldOut ? '대기자 접수중' : '신청가능'}</span>
+          <span className={`px-3 py-1 rounded-full text-sm font-bold ${isSoldOut ? 'bg-red-600 text-white' : 'bg-white text-red-600'}`}>
+            {isSoldOut ? '마감 / 대기자 접수중' : '신청가능'}
+          </span>
         </div>
         
         <div className="p-6 grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -236,7 +241,8 @@ function UserHome({ schedule, reservedSeats, onApplyClick, currentUser, applicat
 }
 
 function ApplicationForm({ schedule, reservedSeats, onCancel, onSubmit, currentUser }: any) {
-  const isSoldOut = reservedSeats >= schedule.maxSeats; // 정원 초과 여부 파악
+  // 수정: DB 컬럼명인 max_seats로 변경
+  const isSoldOut = reservedSeats >= schedule.max_seats; 
   const [rep, setRep] = useState({ name: '', phone: '', type: '왕복', location: '서울월드컵경기장' });
   const [companions, setCompanions] = useState<any[]>([]);
   const [isMinor, setIsMinor] = useState(false);
@@ -246,10 +252,9 @@ function ApplicationForm({ schedule, reservedSeats, onCancel, onSubmit, currentU
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if(!rep.name || !rep.phone) return alert('대표자 정보를 입력해주세요.');
-    if(rep.phone.length < 12) return alert('올바른 연락처를 입력해주세요.'); // 010-0000-0000 이면 13자리
+    if(rep.phone.length < 12) return alert('올바른 연락처를 입력해주세요.'); 
     if(isMinor && !guardianPhone) return alert('미성년자는 보호자 연락처를 반드시 입력해야 합니다.');
     
-    // 대기자 접수일 경우에만 환불계좌 필수
     if(isSoldOut && !refundAccount) return alert('대기자 배차 및 환불 처리를 위한 계좌번호를 입력해주세요.');
 
     onSubmit({ representative: rep, companions, isMinor, guardianPhone, refundAccount });
@@ -301,7 +306,6 @@ function ApplicationForm({ schedule, reservedSeats, onCancel, onSubmit, currentU
               {isMinor && <input type="text" value={guardianPhone} onChange={e => setGuardianPhone(formatPhoneNumber(e.target.value))} maxLength={13} className="mt-2 w-full border p-2 rounded text-sm placeholder-gray-300" placeholder="보호자 연락처 (010-0000-0000)" required />}
             </div>
             
-            {/* 대기자일 경우에만 환불 계좌 노출 */}
             {isSoldOut && (
               <div className="bg-red-50 p-3 rounded border border-red-200">
                 <label className="block text-sm font-bold text-red-700 mb-1">배차 대기 환불 계좌 (필수)</label>
@@ -376,21 +380,19 @@ function AdminDashboard({ schedule, applications, reservedSeats, onUpdateStatus,
                       </div>
                     </td>
                     <td className="p-3">
-                      {/* 대표자 정보 */}
                       <div className="font-bold text-black text-base border-b pb-1 mb-1">
                         [대표] {app.rep_name} <span className="text-gray-500 font-normal text-sm ml-2">📞 {app.rep_phone}</span>
                         <div className="text-xs text-gray-500 font-normal mt-1">{app.boarding_type} / 탑승지: {app.boarding_location}</div>
                         {app.is_minor && <div className="text-xs text-orange-600 font-normal mt-1">보호자: {app.guardian_phone}</div>}
                       </div>
                       
-                      {/* 동반자 상세 정보 펼쳐서 보여주기 */}
                       {app.companion_count > 0 && (
                         <div className="mt-2 bg-gray-50 p-2 rounded border border-gray-100">
                           <p className="text-xs font-bold text-gray-500 mb-1">동반자 ({app.companion_count}명)</p>
                           {app.companions_info?.map((comp: any, idx: number) => (
                             <div key={idx} className="text-xs text-gray-700 mb-1 flex items-center gap-2">
                               <span className="bg-gray-200 px-1 rounded">{idx + 1}</span> 
-                              <strong>{comp.name}</strong> ({comp.phone}) - {comp.boarding_type} / {comp.location}
+                              <strong>{comp.name}</strong> ({comp.phone}) - {comp.type} / {comp.location}
                             </div>
                           ))}
                         </div>
