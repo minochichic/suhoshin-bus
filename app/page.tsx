@@ -31,7 +31,7 @@ export default function App() {
     setDataLoading(true);
     const { data: matchData } = await supabase.from('matches').select('*').eq('status', 'OPEN').order('created_at', { ascending: false }).limit(1).single();
     if (matchData) {
-      if (!matchData.bus_capacities) matchData.bus_capacities = {}; // 초기화
+      if (!matchData.bus_capacities) matchData.bus_capacities = {};
       setSchedule(matchData);
       const { data: resData } = await supabase.from('reservations').select('*').eq('match_id', matchData.id).order('bus_number', { ascending: true, nullsFirst: false }).order('created_at', { ascending: true });
       if (resData) setApplications(resData);
@@ -62,18 +62,21 @@ export default function App() {
     fetchData().then(() => verifyTicket());
   }, []);
 
-  // 📊 통계 분리 (취소/환불 상태인 사람은 정원 카운트에서 제외!)
+  // 📊 핵심 로직: 활성 인원과 취소 인원 완벽 분리 및 합산
   const activeApplications = applications.filter(app => app.status !== '취소요청' && app.status !== '환불완료');
   const cancelledApplications = applications.filter(app => app.status === '취소요청' || app.status === '환불완료');
 
-  const generalSeats = activeApplications.filter(app => app.user_id !== '관리자수동추가').reduce((total, app) => total + 1 + (app.companion_count || 0), 0);
-  const manualSeats = activeApplications.filter(app => app.user_id === '관리자수동추가').reduce((total, app) => total + 1 + (app.companion_count || 0), 0);
-  const totalReservedSeats = generalSeats + manualSeats;
+  const activeSeats = activeApplications.reduce((total, app) => total + 1 + (app.companion_count || 0), 0);
+  const cancelledSeats = cancelledApplications.reduce((total, app) => total + 1 + (app.companion_count || 0), 0);
+  
+  // 사용자 화면에 노출되며, 대기자 전환 기준이 되는 '누적 총 신청 인원'
+  const grossSeats = activeSeats + cancelledSeats; 
 
   const handleLogout = () => { setCurrentUser(null); window.location.href = 'https://fcseoul12.com'; };
 
   const submitApplication = async (applicationData: any) => {
-    const isWaiting = totalReservedSeats >= schedule.max_seats; 
+    // 취소표 방지: 활성 인원이 아니라 누적 인원(grossSeats)을 기준으로 대기자 판단
+    const isWaiting = grossSeats >= schedule.max_seats; 
     let finalCompanions = applicationData.companions;
     let compCount = finalCompanions.length;
     
@@ -82,8 +85,8 @@ export default function App() {
       finalCompanions = Array.from({ length: compCount }).map((_, i) => ({ name: `소모임 인원 ${i+1}`, phone: '', type: applicationData.representative.type, location: applicationData.representative.location }));
     }
 
-    if (!applicationData.isAdminAdd && !isWaiting && totalReservedSeats + 1 + compCount > schedule.max_seats) {
-        alert(`잔여 좌석이 부족하여 전체가 대기자로 넘어갑니다.`);
+    if (!applicationData.isAdminAdd && !isWaiting && grossSeats + 1 + compCount > schedule.max_seats) {
+        alert(`잔여 좌석이 부족하여 신청 인원 전체가 대기자로 넘어갑니다.`);
     }
 
     const insertData = {
@@ -98,7 +101,7 @@ export default function App() {
       is_minor: applicationData.isMinor,
       guardian_phone: applicationData.guardianPhone,
       refund_account: applicationData.refundAccount || null,
-      is_waiting: applicationData.isAdminAdd ? false : totalReservedSeats >= schedule.max_seats,
+      is_waiting: applicationData.isAdminAdd ? false : grossSeats >= schedule.max_seats,
       status: applicationData.isAdminAdd ? '입금완료' : '입금대기',
       bus_number: applicationData.busNumber || null
     };
@@ -112,60 +115,60 @@ export default function App() {
     }
   };
 
-  // 🔥 핵심: 부분 취소 및 환불 추적 로직 (소프트 삭제 + 분신 생성)
+  // 🔥 부분 취소 (누적 카운트는 유지하면서 빈자리 창출)
   const handlePartialCancel = async (app: any, targetIdx: number) => {
-    if (!window.confirm('선택한 인원의 예매를 취소하시겠습니까?\n(취소된 인원은 관리자의 환불 대기 명단으로 이동됩니다.)')) return;
+    if (!window.confirm('선택한 인원의 예매를 취소하시겠습니까?\n(취소된 인원은 환불 대기 명단으로 이동됩니다.)')) return;
+
+    // 대표자만 단독으로 있는 경우 (동반자 0명) -> 삭제하지 않고 상태만 변경 (누적카운트 유지)
+    if (targetIdx === -1 && app.companion_count === 0) {
+      await supabase.from('reservations').update({ status: '취소요청', bus_number: null }).eq('id', app.id);
+      fetchData();
+      return;
+    }
 
     let cancelledPerson = null;
 
     if (targetIdx === -1) {
-      // 1. 대표자를 취소하는 경우
+      // 1. 대표자를 취소 (동반자가 있는 경우 승계)
       cancelledPerson = { name: app.rep_name, phone: app.rep_phone, type: app.boarding_type, location: app.boarding_location };
-      if (app.companion_count === 0) {
-         // 동반자가 없으면 이 그룹 자체를 '취소요청' 상태로 변경
-         await supabase.from('reservations').update({ status: '취소요청' }).eq('id', app.id);
-      } else {
-         // 동반자가 있으면 1번 동반자를 대표자로 승격시키고, 기존 대표자는 빠져나옴
-         const newRep = app.companions_info[0];
-         const newCompanions = app.companions_info.slice(1);
-         await supabase.from('reservations').update({ 
-           rep_name: newRep.name || '이름없음', rep_phone: newRep.phone || app.rep_phone, 
-           boarding_type: newRep.type || app.boarding_type, boarding_location: newRep.location || app.boarding_location, 
-           companion_count: app.companion_count - 1, companions_info: newCompanions 
-         }).eq('id', app.id);
-      }
+      const newRep = app.companions_info[0];
+      const newCompanions = app.companions_info.slice(1);
+      
+      await supabase.from('reservations').update({ 
+        rep_name: newRep.name || '이름없음', rep_phone: newRep.phone || app.rep_phone, 
+        boarding_type: newRep.type || app.boarding_type, boarding_location: newRep.location || app.boarding_location, 
+        companion_count: app.companion_count - 1, companions_info: newCompanions 
+      }).eq('id', app.id);
+      
     } else {
-      // 2. 동반자를 취소하는 경우
+      // 2. 동반자를 취소
       cancelledPerson = app.companions_info[targetIdx];
       const newCompanions = [...app.companions_info];
       newCompanions.splice(targetIdx, 1);
       await supabase.from('reservations').update({ companion_count: app.companion_count - 1, companions_info: newCompanions }).eq('id', app.id);
     }
 
-    // 3. 빠져나온 취소자를 위한 독립적인 '취소요청' 데이터 생성 (환불 추적용)
-    if (cancelledPerson && (targetIdx !== -1 || app.companion_count > 0)) {
-      await supabase.from('reservations').insert([{
-        match_id: app.match_id,
-        user_id: app.user_id, // 본래 신청자 ID 유지
-        rep_name: cancelledPerson.name,
-        rep_phone: cancelledPerson.phone,
-        boarding_type: cancelledPerson.type || app.boarding_type,
-        boarding_location: cancelledPerson.location || app.boarding_location,
-        companion_count: 0,
-        companions_info: [],
-        refund_account: app.refund_account,
-        bus_number: app.bus_number,
-        status: '취소요청', // 관리자가 볼 수 있게 취소요청으로 세팅
-        is_waiting: false
-      }]);
-    }
+    // 3. 취소된 사람을 환불 추적용 데이터(취소요청)로 별도 분리 저장
+    await supabase.from('reservations').insert([{
+      match_id: app.match_id,
+      user_id: app.user_id,
+      rep_name: cancelledPerson.name,
+      rep_phone: cancelledPerson.phone,
+      boarding_type: cancelledPerson.type || app.boarding_type,
+      boarding_location: cancelledPerson.location || app.boarding_location,
+      companion_count: 0,
+      companions_info: [],
+      refund_account: app.refund_account,
+      bus_number: null, // 버스 좌석 반환
+      status: '취소요청', 
+      is_waiting: false
+    }]);
+
     fetchData();
   };
 
   const updateApplicationStatus = async (id: string, newStatus: string) => { await supabase.from('reservations').update({ status: newStatus }).eq('id', id); fetchData(); };
   const updateBusNumber = async (id: string, busNum: string) => { const val = busNum === '' ? null : parseInt(busNum, 10); await supabase.from('reservations').update({ bus_number: val }).eq('id', id); fetchData(); };
-  
-  // 🚌 호차별 정원 및 배차 설정 저장
   const updateBusSettings = async (newSeats: number, newBuses: number, capacities: Record<string, number>) => {
     if (!isNaN(newSeats) && !isNaN(newBuses)) {
       await supabase.from('matches').update({ max_seats: newSeats, bus_count: newBuses, bus_capacities: capacities }).eq('id', schedule.id);
@@ -173,9 +176,7 @@ export default function App() {
       alert('배차 및 호차별 정원이 성공적으로 저장되었습니다.');
     }
   };
-
-  // 진짜 DB 영구 삭제 (잘못 추가한 테스트 데이터용)
-  const hardDeleteApplication = async (id: string) => { if(window.confirm('경고: 환불 명단에도 남지 않게 DB에서 완전히 영구 삭제하시겠습니까?')) { await supabase.from('reservations').delete().eq('id', id); fetchData(); } };
+  const hardDeleteApplication = async (id: string) => { if(window.confirm('경고: 환불 명단에서도 삭제되어 누적 카운트가 줄어듭니다. 영구 삭제하시겠습니까?')) { await supabase.from('reservations').delete().eq('id', id); fetchData(); } };
 
   if (dataLoading || authLoading) return <div className="min-h-screen bg-black flex items-center justify-center font-bold text-xl text-red-600">인증 정보 확인 중...</div>;
   if (!currentUser) return <div className="min-h-screen bg-black flex items-center justify-center"><div className="bg-white p-8 rounded text-center"><h1 className="text-xl font-bold">권한 없음</h1><p className="mt-2 text-sm">홈페이지를 통해 로그인해주세요.</p></div></div>;
@@ -196,9 +197,10 @@ export default function App() {
       <main className="max-w-6xl mx-auto px-4 py-8">
         {!schedule && view !== 'adminDashboard' ? <div className="text-center py-20 text-2xl font-bold">예정된 일정이 없습니다.</div> : (
           <>
-            {view === 'home' && <UserHome schedule={schedule} totalSeats={totalReservedSeats} onApplyClick={() => setView('applyForm')} currentUser={currentUser} activeApps={activeApplications} onPartialCancel={handlePartialCancel} />}
-            {view === 'applyForm' && <ApplicationForm schedule={schedule} reservedSeats={totalReservedSeats} onCancel={() => setView('home')} onSubmit={submitApplication} />}
-            {view === 'adminDashboard' && <AdminDashboard schedule={schedule} activeApps={activeApplications} cancelledApps={cancelledApplications} stats={{ generalSeats, manualSeats, totalReservedSeats }} onUpdateStatus={updateApplicationStatus} onUpdateBusNumber={updateBusNumber} onHardDelete={hardDeleteApplication} onUpdateSettings={updateBusSettings} onManualAdd={submitApplication} onPartialCancel={handlePartialCancel} />}
+            {/* 사용자 화면에는 누적 카운트인 grossSeats를 넘겨줍니다 */}
+            {view === 'home' && <UserHome schedule={schedule} totalSeats={grossSeats} onApplyClick={() => setView('applyForm')} currentUser={currentUser} activeApps={activeApplications} onPartialCancel={handlePartialCancel} />}
+            {view === 'applyForm' && <ApplicationForm schedule={schedule} reservedSeats={grossSeats} onCancel={() => setView('home')} onSubmit={submitApplication} />}
+            {view === 'adminDashboard' && <AdminDashboard schedule={schedule} activeApps={activeApplications} cancelledApps={cancelledApplications} stats={{ activeSeats, cancelledSeats, grossSeats }} onUpdateStatus={updateApplicationStatus} onUpdateBusNumber={updateBusNumber} onHardDelete={hardDeleteApplication} onUpdateSettings={updateBusSettings} onManualAdd={submitApplication} onPartialCancel={handlePartialCancel} />}
           </>
         )}
       </main>
@@ -209,7 +211,6 @@ export default function App() {
 // ================= 일반 사용자 홈 =================
 function UserHome({ schedule, totalSeats, onApplyClick, currentUser, activeApps, onPartialCancel }: any) {
   const isSoldOut = totalSeats >= schedule.max_seats; 
-  // 취소된 내역은 보여주지 않거나 별도 처리 (여기서는 활성화된 내역만 노출)
   const myApplications = activeApps.filter((app: any) => app.user_id === currentUser.name);
 
   const [now, setNow] = useState(new Date());
@@ -324,7 +325,6 @@ function ApplicationForm({ schedule, reservedSeats, onCancel, onSubmit }: any) {
         {isSoldOut && <span className="bg-red-600 text-white px-3 py-1 rounded-full text-sm font-bold animate-pulse">현재 대기자 접수 중</span>}
       </div>
       <form onSubmit={handleSubmit} className="p-6 space-y-8">
-        {/* 기존 입력 폼 구조와 동일하여 생략 없이 유지 */}
         <section>
           <h3 className="text-lg font-black border-b-2 border-gray-100 pb-2 mb-4 flex items-center"><Users className="mr-2 text-red-600" size={20} /> 대표자 정보</h3>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -385,22 +385,18 @@ function AdminDashboard({ schedule, activeApps, cancelledApps, stats, onUpdateSt
   const [showManualAdd, setShowManualAdd] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   
-  // DB에 저장된 호차별 정원 파싱
   const currentCapacities = schedule.bus_capacities || {};
   const [settingsData, setSettingsData] = useState({ maxSeats: schedule.max_seats, busCount: schedule.bus_count || 1, capacities: currentCapacities });
   const [manualData, setManualData] = useState({ name: '', phone: '', type: '왕복', location: '서울월드컵경기장', busNumber: '', totalHeadcount: 1 });
   
-  // 탭 상태: ALL, UNASSIGNED, CANCELLED, 1, 2, ...
   const [filterBus, setFilterBus] = useState<string | number>('ALL');
   const busOptions = Array.from({ length: schedule.bus_count || 1 }, (_, i) => i + 1);
 
-  // 현재 호차별 탑승 인원 계산 함수
   const getBusCurrentHeadcount = (busNum: number) => {
     return activeApps.filter((a:any) => a.bus_number === busNum).reduce((total:number, app:any) => total + 1 + (app.companion_count || 0), 0);
   };
 
   const handleSettingsSave = () => {
-    // 호차별 정원의 합계를 자동으로 전체 정원(maxSeats)으로 반영
     const totalCapacitySum = Object.values(settingsData.capacities).reduce((acc: any, val: any) => acc + Number(val), 0) as number;
     const finalMaxSeats = totalCapacitySum > 0 ? totalCapacitySum : settingsData.maxSeats;
     onUpdateSettings(finalMaxSeats, settingsData.busCount, settingsData.capacities);
@@ -414,7 +410,6 @@ function AdminDashboard({ schedule, activeApps, cancelledApps, stats, onUpdateSt
     setManualData({ name: '', phone: '', type: '왕복', location: '서울월드컵경기장', busNumber: '', totalHeadcount: 1 });
   };
 
-  // 선택된 탭에 따라 명단 필터링 (취소/환불 탭 분리!)
   let filteredApplications = activeApps;
   if (filterBus === 'CANCELLED') {
     filteredApplications = cancelledApps;
@@ -428,11 +423,10 @@ function AdminDashboard({ schedule, activeApps, cancelledApps, stats, onUpdateSt
 
   return (
     <div className="space-y-6">
-      {/* 관리자 상단 패널 */}
       <div className="bg-black text-white p-4 rounded-xl border-l-4 border-red-600 flex justify-between items-center flex-wrap gap-4 shadow-lg">
         <div>
           <h2 className="text-xl font-black"><ShieldAlert className="inline mr-2 text-red-600" size={24} /> 관리자 패널</h2>
-          <p className="text-sm text-gray-400 mt-1">일반: {stats.generalSeats}명 + 수동추가: {stats.manualSeats}명 = <strong className="text-red-400 text-lg">실탑승 총 {stats.totalReservedSeats}명</strong> / 최대 {schedule.max_seats}석</p>
+          <p className="text-sm text-gray-400 mt-1">실탑승(활성): {stats.activeSeats}명 + 취소(빈자리): {stats.cancelledSeats}명 = <strong className="text-red-400 text-lg">누적 카운트 {stats.grossSeats}명</strong> / 최대 {schedule.max_seats}석</p>
           <p className="text-sm text-gray-400">배차 운행: 총 {schedule.bus_count || 1}대 <span className="text-red-500 font-bold ml-2">(환불대기: {cancelledApps.length}건)</span></p>
         </div>
         <div className="flex gap-2">
@@ -441,7 +435,6 @@ function AdminDashboard({ schedule, activeApps, cancelledApps, stats, onUpdateSt
         </div>
       </div>
 
-      {/* 1-1. 호차별 상세 정원 세팅 폼 */}
       {showSettings && (
         <div className="bg-blue-50 border-2 border-blue-200 rounded-xl p-5 shadow-inner">
           <h3 className="font-bold text-blue-800 mb-4 flex items-center"><Settings size={18} className="mr-2"/> 배차 및 호차별 정원 설정</h3>
@@ -455,8 +448,6 @@ function AdminDashboard({ schedule, activeApps, cancelledApps, stats, onUpdateSt
               <input type="number" value={settingsData.maxSeats} readOnly className="w-full border border-gray-300 bg-gray-100 p-2 rounded font-bold text-gray-500 cursor-not-allowed" />
             </div>
           </div>
-          
-          {/* 동적 호차별 정원 입력칸 생성 */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
              {Array.from({ length: settingsData.busCount }).map((_, i) => {
                const num = i + 1;
@@ -468,7 +459,6 @@ function AdminDashboard({ schedule, activeApps, cancelledApps, stats, onUpdateSt
                )
              })}
           </div>
-
           <div className="mt-5 flex gap-2">
             <button onClick={handleSettingsSave} className="bg-blue-600 text-white font-bold px-6 py-2 rounded hover:bg-blue-700">설정 적용하기</button>
             <button onClick={() => setShowSettings(false)} className="border border-blue-300 text-blue-700 px-4 py-2 rounded hover:bg-blue-100">닫기</button>
@@ -476,7 +466,6 @@ function AdminDashboard({ schedule, activeApps, cancelledApps, stats, onUpdateSt
         </div>
       )}
 
-      {/* 1-2. 수동 명단 추가 */}
       {showManualAdd && (
         <div className="bg-red-50 border-2 border-red-200 rounded-xl p-5 shadow-inner">
           <h3 className="font-bold text-red-700 mb-3 flex items-center"><UserPlus size={18} className="mr-2"/> 오프라인/소모임 대량 인원 직접 추가</h3>
@@ -492,7 +481,6 @@ function AdminDashboard({ schedule, activeApps, cancelledApps, stats, onUpdateSt
         </div>
       )}
 
-      {/* 2. 탭(필터) 네비게이션 */}
       <div className="flex overflow-x-auto gap-2 pb-2 scrollbar-hide items-center border-b-2 border-gray-200">
         <button onClick={() => setFilterBus('ALL')} className={`whitespace-nowrap px-4 py-2 rounded-t-lg font-bold transition-colors ${filterBus === 'ALL' ? 'bg-gray-800 text-white' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'}`}>전체 실탑승 명단</button>
         <button onClick={() => setFilterBus('UNASSIGNED')} className={`whitespace-nowrap px-4 py-2 rounded-t-lg font-bold transition-colors ${filterBus === 'UNASSIGNED' ? 'bg-yellow-400 text-yellow-900' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'}`}>미배정 인원</button>
@@ -506,13 +494,11 @@ function AdminDashboard({ schedule, activeApps, cancelledApps, stats, onUpdateSt
             </button>
           )
         })}
-        {/* 🚨 취소/환불 전용 특별 탭 */}
         <button onClick={() => setFilterBus('CANCELLED')} className={`ml-auto whitespace-nowrap px-4 py-2 rounded-t-lg font-bold transition-colors border-l border-r border-t border-red-200 ${filterBus === 'CANCELLED' ? 'bg-red-50 text-red-600 border-b-white translate-y-[2px]' : 'bg-white text-red-400 hover:bg-red-50'}`}>
           <RefreshCcw size={14} className="inline mr-1"/> 취소 및 환불 관리 ({cancelledApps.length})
         </button>
       </div>
 
-      {/* 3. 명단 리스트 출력부 */}
       <div className={`rounded-b-xl rounded-tr-xl shadow border overflow-hidden ${filterBus === 'CANCELLED' ? 'bg-red-50 border-red-200' : 'bg-white border-gray-200'}`}>
         <div className={`p-4 border-b flex justify-between font-bold ${filterBus === 'CANCELLED' ? 'bg-red-100 text-red-800' : 'bg-gray-50 text-gray-800'}`}>
           {filterBus === 'ALL' ? '통합 전체 실탑승 명단' : filterBus === 'CANCELLED' ? '취소 및 환불 처리 대기명단' : filterBus === 'UNASSIGNED' ? '호차 미배정 명단' : `${filterBus}호차 명단`} ({filteredApplications.length}건)
@@ -526,8 +512,6 @@ function AdminDashboard({ schedule, activeApps, cancelledApps, stats, onUpdateSt
               {filteredApplications.length === 0 ? <tr><td colSpan={4} className="p-10 text-center text-gray-400 bg-white">조회된 데이터가 없습니다.</td></tr> :
                 filteredApplications.map((app: any) => (
                   <tr key={app.id} className={`border-b hover:bg-gray-50 bg-white ${filterBus === 'CANCELLED' ? 'opacity-80' : ''}`}>
-                    
-                    {/* 첫 번째 칸: 호차배정 OR 환불계좌 (취소탭일 때) */}
                     <td className="p-3 text-center bg-gray-50 border-r align-top">
                       {filterBus === 'CANCELLED' ? (
                          <div className="text-xs font-bold text-red-600 break-all bg-white p-2 rounded border border-red-100 shadow-inner">
@@ -540,8 +524,6 @@ function AdminDashboard({ schedule, activeApps, cancelledApps, stats, onUpdateSt
                         </select>
                       )}
                     </td>
-
-                    {/* 두 번째 칸: 명단 정보 */}
                     <td className="p-3">
                       <div className="flex items-center justify-between mb-1">
                         <div>
@@ -549,12 +531,10 @@ function AdminDashboard({ schedule, activeApps, cancelledApps, stats, onUpdateSt
                           {app.rep_phone && <span className="text-xs text-gray-500 ml-1">({app.rep_phone})</span>}
                           {app.is_waiting && <span className="ml-2 px-2 py-0.5 text-xs bg-purple-100 text-purple-700 rounded-full font-bold">대기자</span>}
                         </div>
-                        {/* 취소탭이 아닐 때만 개별 취소 버튼 노출 */}
                         {filterBus !== 'CANCELLED' && (
                           <button onClick={() => onPartialCancel(app, -1)} className="text-red-400 hover:text-red-600 ml-2 border border-red-200 px-2 py-1 rounded text-xs transition-colors" title="이 사람만 취소하고 환불명단으로 보냅니다">개별취소</button>
                         )}
                       </div>
-                      
                       {app.companion_count > 0 && (
                         <div className="pl-3 border-l-2 border-gray-200 mt-2 space-y-1">
                           {app.companions_info.map((comp: any, idx: number) => (
@@ -568,8 +548,6 @@ function AdminDashboard({ schedule, activeApps, cancelledApps, stats, onUpdateSt
                         </div>
                       )}
                     </td>
-
-                    {/* 세 번째 칸: 상태 변경 및 영구 삭제 */}
                     <td className="p-3 text-center space-y-2 align-top">
                        <select value={app.status} onChange={(e) => onUpdateStatus(app.id, e.target.value)} className={`border text-xs p-2 rounded w-full font-bold shadow-sm ${app.status === '입금완료' ? 'bg-green-50 text-green-700 border-green-200' : app.status === '취소요청' ? 'bg-red-100 text-red-700 border-red-300' : 'bg-white'}`}>
                          <option value="입금대기">입금대기</option>
@@ -577,8 +555,6 @@ function AdminDashboard({ schedule, activeApps, cancelledApps, stats, onUpdateSt
                          <option value="취소요청">취소요청 (환불대기)</option>
                          <option value="환불완료">환불완료</option>
                        </select>
-                       
-                       {/* 취소탭에서만 전체 영구 삭제 버튼 노출하여 실수 방지 */}
                        {filterBus === 'CANCELLED' && (
                          <button onClick={() => onHardDelete(app.id)} className="text-xs text-gray-400 w-full text-right hover:text-red-500 mt-2">DB 영구삭제</button>
                        )}
