@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { Users, Bus, Calendar, Clock, MapPin, CheckCircle, AlertCircle, Plus, Trash2, LogOut, ShieldAlert } from 'lucide-react';
+import { Users, Bus, Calendar, Clock, MapPin, CheckCircle, AlertCircle, Plus, Trash2, LogOut, ShieldAlert, Edit2, UserPlus } from 'lucide-react';
 import { createClient } from '@supabase/supabase-js';
 
 // 1. 수파베이스 DB 연결
@@ -12,6 +12,7 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 type UserRole = 'user' | 'auth_user' | 'admin';
 type User = { role: UserRole; name: string } | null;
 
+// 연락처 자동 하이픈 생성 함수
 const formatPhoneNumber = (value: string) => {
   const numbers = value.replace(/[^\d]/g, ''); 
   if (numbers.length <= 3) return numbers;
@@ -26,37 +27,43 @@ export default function App() {
   const [applications, setApplications] = useState<any[]>([]);
   
   const [dataLoading, setDataLoading] = useState(true);
-  const [authLoading, setAuthLoading] = useState(true); // SSO 인증 로딩 상태
+  const [authLoading, setAuthLoading] = useState(true);
 
+  // DB 데이터 불러오기
   const fetchData = async () => {
     setDataLoading(true);
     const { data: matchData } = await supabase.from('matches').select('*').eq('status', 'OPEN').order('created_at', { ascending: false }).limit(1).single();
     
     if (matchData) {
       setSchedule(matchData);
-      const { data: resData } = await supabase.from('reservations').select('*').eq('match_id', matchData.id);
+      // 호차 번호(bus_number) 순서대로 정렬 후 신청 시간순 정렬
+      const { data: resData } = await supabase.from('reservations')
+        .select('*')
+        .eq('match_id', matchData.id)
+        .order('bus_number', { ascending: true, nullsFirst: false })
+        .order('created_at', { ascending: true });
       if (resData) setApplications(resData);
     }
     setDataLoading(false);
   };
 
-  // 🔒 2. 대망의 SSO 티켓 검증 로직
+  // 🔒 SSO 티켓 검증 로직
   useEffect(() => {
     const verifyTicket = async () => {
       const urlParams = new URLSearchParams(window.location.search);
       const ticket = urlParams.get('ticket');
 
       if (!ticket) {
-        setAuthLoading(false); // 티켓이 없으면 인증 실패 (접근 거부 화면 노출)
+        setAuthLoading(false); 
         return; 
       }
 
-      // 🛠️ [개발자 테스트용 코드] 실제 API가 완성되기 전 테스트를 위한 만능 티켓
+      // 🛠️ [개발자 테스트용 코드]
       if (ticket === 'test_admin') {
         setCurrentUser({ role: 'admin', name: '테스트관리자' });
         setView('adminDashboard');
         setAuthLoading(false);
-        window.history.replaceState({}, document.title, window.location.pathname); // 주소창 티켓 삭제
+        window.history.replaceState({}, document.title, window.location.pathname);
         return;
       }
       if (ticket === 'test_user') {
@@ -67,31 +74,29 @@ export default function App() {
         return;
       }
 
-      // 🚀 [실제 서비스용 코드] 본진 서버(fcseoul12.com) API와 통신
+      // 🚀 [실제 서비스용 코드] 본진 서버 연동
       try {
         const response = await fetch('https://fcseoul12.com/api/sso/verify-ticket', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ ticket: ticket, secret_key: 'FCSeoul_Bus_2026_Secret!' })
         });
-
         const result = await response.json();
-
+        
         if (result.status === 'success') {
           setCurrentUser({ name: result.data.nickname, role: result.data.role as UserRole });
           setView(result.data.role === 'admin' ? 'adminDashboard' : 'home');
-          window.history.replaceState({}, document.title, window.location.pathname); // 1회용 티켓 흔적 지우기
+          window.history.replaceState({}, document.title, window.location.pathname);
         } else {
-          alert('로그인 정보가 만료되었습니다. 수호신 홈페이지에서 다시 접속해주세요.');
+          alert('로그인 정보가 만료되었습니다. 다시 접속해주세요.');
         }
       } catch (error) {
-        // 현재는 API가 없으므로 무조건 여기로 빠집니다 (테스트용 콘솔 에러만 출력)
         console.error('인증 API 대기중...');
       } finally {
         setAuthLoading(false);
       }
     };
-
+    
     fetchData().then(() => verifyTicket());
   }, []);
 
@@ -99,19 +104,21 @@ export default function App() {
 
   const handleLogout = () => {
     setCurrentUser(null);
-    window.location.href = 'https://fcseoul12.com'; // 로그아웃 시 본진으로 돌려보냄
+    window.location.href = 'https://fcseoul12.com'; 
   };
 
+  // 데이터 저장 함수 (사용자 직접 신청 & 관리자 수동 추가 공용)
   const submitApplication = async (applicationData: any) => {
     const isWaiting = totalReservedSeats >= schedule.max_seats; 
     
-    if (!isWaiting && totalReservedSeats + 1 + applicationData.companions.length > schedule.max_seats) {
+    // 일반 신청인데 빈자리가 부족한 경우 방지
+    if (!applicationData.isAdminAdd && !isWaiting && totalReservedSeats + 1 + applicationData.companions.length > schedule.max_seats) {
         alert(`현재 잔여 좌석이 ${schedule.max_seats - totalReservedSeats}석밖에 남지 않아 신청 인원 전체가 대기자로 넘어갑니다.`);
     }
 
     const insertData = {
       match_id: schedule.id,
-      user_id: currentUser?.name,
+      user_id: currentUser?.name || '관리자수동추가',
       rep_name: applicationData.representative.name,
       rep_phone: applicationData.representative.phone,
       boarding_type: applicationData.representative.type,
@@ -121,8 +128,9 @@ export default function App() {
       is_minor: applicationData.isMinor,
       guardian_phone: applicationData.guardianPhone,
       refund_account: applicationData.refundAccount || null,
-      is_waiting: totalReservedSeats >= schedule.max_seats,
-      status: '입금대기'
+      is_waiting: applicationData.isAdminAdd ? false : totalReservedSeats >= schedule.max_seats, // 관리자 수동 추가는 대기자 무시 가능
+      status: applicationData.isAdminAdd ? '입금완료' : '입금대기',
+      bus_number: applicationData.busNumber || null // 호차 배정
     };
 
     const { error } = await supabase.from('reservations').insert([insertData]);
@@ -130,27 +138,47 @@ export default function App() {
     if (error) {
       alert('오류가 발생했습니다: ' + error.message);
     } else {
-      alert(insertData.is_waiting ? '정원이 마감되어 [대기자]로 신청되었습니다. 추가 배차 확정 시 안내해 드립니다.' : '신청이 완료되었습니다!');
+      if(!applicationData.isAdminAdd) alert(insertData.is_waiting ? '정원이 마감되어 [대기자]로 신청되었습니다. 추가 배차 확정 시 안내해 드립니다.' : '신청이 완료되었습니다!');
       fetchData();
-      setView('home');
+      if(!applicationData.isAdminAdd) setView('home');
     }
   };
 
+  // 관리자 기능: 상태 업데이트
   const updateApplicationStatus = async (id: string, newStatus: string) => {
     await supabase.from('reservations').update({ status: newStatus }).eq('id', id);
     fetchData();
   };
 
+  // 관리자 기능: 호차 배정 업데이트
+  const updateBusNumber = async (id: string, busNum: string) => {
+    const val = busNum === '' ? null : parseInt(busNum, 10);
+    await supabase.from('reservations').update({ bus_number: val }).eq('id', id);
+    fetchData();
+  };
+
+  // 관리자 기능: 최대 배차 인원 수정
+  const updateMaxSeats = async () => {
+    const newSeats = window.prompt(`현재 최대 배차 인원은 ${schedule.max_seats}명입니다.\n변경할 배차 인원(숫자)을 입력하세요:`, schedule.max_seats);
+    if (newSeats && !isNaN(Number(newSeats))) {
+      await supabase.from('matches').update({ max_seats: Number(newSeats) }).eq('id', schedule.id);
+      fetchData();
+      alert('배차 인원이 성공적으로 수정되었습니다.');
+    }
+  };
+
+  // 관리자 기능: 완전 삭제
   const deleteApplication = async (id: string) => {
-    if(window.confirm('정말 이 신청을 DB에서 완전 삭제하시겠습니까? (좌석이 1자리 비게 됩니다)')) {
+    if(window.confirm('정말 이 신청을 DB에서 완전 삭제하시겠습니까?')) {
       await supabase.from('reservations').delete().eq('id', id);
       fetchData();
     }
   };
 
+  // 로딩 화면
   if (dataLoading || authLoading) return <div className="min-h-screen bg-black flex items-center justify-center font-bold text-xl text-red-600">수호신 인증 정보를 확인 중입니다...</div>;
 
-  // ⛔ 티켓 없이 접속한 사람을 쫓아내는 철통 방어 화면
+  // ⛔ 접근 권한 없음 화면
   if (!currentUser) {
     return (
       <div className="min-h-screen bg-black flex items-center justify-center p-4">
@@ -158,14 +186,13 @@ export default function App() {
           <div className="flex justify-center mb-4"><ShieldAlert size={48} className="text-red-600" /></div>
           <h1 className="text-2xl font-black mb-2 text-black">접근 권한 없음</h1>
           <p className="text-gray-500 mb-8 text-sm">정상적인 접근이 아닙니다.<br/>수호신 홈페이지를 통해 로그인 후 접속해주세요.</p>
-          <a href="https://fcseoul12.com" className="block w-full py-3 px-4 bg-red-600 text-white rounded-lg hover:bg-red-700 font-bold transition-colors">
-            수호신 홈페이지로 돌아가기
-          </a>
+          <a href="https://fcseoul12.com" className="block w-full py-3 px-4 bg-red-600 text-white rounded-lg hover:bg-red-700 font-bold transition-colors">홈페이지로 돌아가기</a>
         </div>
       </div>
     );
   }
 
+  // 메인 렌더링
   return (
     <div className="min-h-screen bg-gray-100 font-sans text-gray-800">
       <nav className="bg-black text-white shadow-md border-b-4 border-red-600">
@@ -178,9 +205,7 @@ export default function App() {
             <span className="text-sm bg-gray-800 border border-gray-700 px-3 py-1 rounded-full text-red-400 font-bold hidden sm:inline-block">
               {currentUser.name} ({currentUser.role === 'admin' ? '관리자' : currentUser.role === 'auth_user' ? '인증회원' : '일반회원'})
             </span>
-            <button onClick={handleLogout} className="flex items-center space-x-1 hover:text-red-500 text-sm transition-colors">
-              <LogOut size={16} /> <span>돌아가기</span>
-            </button>
+            <button onClick={handleLogout} className="flex items-center space-x-1 hover:text-red-500 text-sm transition-colors"><LogOut size={16} /> <span>돌아가기</span></button>
           </div>
         </div>
       </nav>
@@ -192,7 +217,7 @@ export default function App() {
           <>
             {view === 'home' && <UserHome schedule={schedule} reservedSeats={totalReservedSeats} onApplyClick={() => setView('applyForm')} currentUser={currentUser} applications={applications} onCancelRequest={updateApplicationStatus} />}
             {view === 'applyForm' && <ApplicationForm schedule={schedule} reservedSeats={totalReservedSeats} onCancel={() => setView('home')} onSubmit={submitApplication} currentUser={currentUser} />}
-            {view === 'adminDashboard' && <AdminDashboard schedule={schedule} applications={applications} reservedSeats={totalReservedSeats} onUpdateStatus={updateApplicationStatus} onDelete={deleteApplication} />}
+            {view === 'adminDashboard' && <AdminDashboard schedule={schedule} applications={applications} reservedSeats={totalReservedSeats} onUpdateStatus={updateApplicationStatus} onUpdateBusNumber={updateBusNumber} onDelete={deleteApplication} onUpdateMaxSeats={updateMaxSeats} onManualAdd={submitApplication} />}
           </>
         )}
       </main>
@@ -200,7 +225,7 @@ export default function App() {
   );
 }
 
-// ================== 컴포넌트 분리 ==================
+// ================== 일반 유저용 화면 컴포넌트 ==================
 
 function UserHome({ schedule, reservedSeats, onApplyClick, currentUser, applications, onCancelRequest }: any) {
   const isSoldOut = reservedSeats >= schedule.max_seats; 
@@ -260,6 +285,7 @@ function UserHome({ schedule, reservedSeats, onApplyClick, currentUser, applicat
                 <div>
                   <p className="font-bold text-lg">{app.rep_name} <span className="text-sm font-normal text-gray-500">외 {app.companion_count}명 {app.is_waiting && <span className="text-red-600 font-bold">(대기자)</span>}</span></p>
                   <p className="text-sm text-gray-500">결제금액: {((1 + app.companion_count) * schedule.price).toLocaleString()}원</p>
+                  {app.bus_number && <p className="text-sm font-bold text-blue-600 mt-1">🚌 {app.bus_number}호차 배정완료</p>}
                 </div>
                 <div className="mt-3 md:mt-0 flex items-center space-x-3">
                   <span className={`px-3 py-1 rounded-full text-sm font-bold ${app.status === '입금완료' ? 'bg-green-100 text-green-700' : app.status === '취소요청' ? 'bg-red-100 text-red-700' : 'bg-yellow-100 text-yellow-700'}`}>
@@ -278,6 +304,8 @@ function UserHome({ schedule, reservedSeats, onApplyClick, currentUser, applicat
   );
 }
 
+// ================== 일반 유저용 상세 신청 폼 ==================
+
 function ApplicationForm({ schedule, reservedSeats, onCancel, onSubmit, currentUser }: any) {
   const isSoldOut = reservedSeats >= schedule.max_seats; 
   const [rep, setRep] = useState({ name: '', phone: '', type: '왕복', location: '서울월드컵경기장' });
@@ -285,7 +313,7 @@ function ApplicationForm({ schedule, reservedSeats, onCancel, onSubmit, currentU
   const [isMinor, setIsMinor] = useState(false);
   const [guardianPhone, setGuardianPhone] = useState('');
   const [refundAccount, setRefundAccount] = useState('');
-  const [privacyAgreed, setPrivacyAgreed] = useState(false); // 🔐 개인정보 동의 상태
+  const [privacyAgreed, setPrivacyAgreed] = useState(false);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -295,7 +323,7 @@ function ApplicationForm({ schedule, reservedSeats, onCancel, onSubmit, currentU
     if(isSoldOut && !refundAccount) return alert('대기자 배차 및 환불 처리를 위한 계좌번호를 입력해주세요.');
     if(!privacyAgreed) return alert('개인정보 수집 및 이용에 동의해야 신청이 가능합니다.');
 
-    onSubmit({ representative: rep, companions, isMinor, guardianPhone, refundAccount });
+    onSubmit({ representative: rep, companions, isMinor, guardianPhone, refundAccount, isAdminAdd: false });
   };
 
   return (
@@ -377,7 +405,7 @@ function ApplicationForm({ schedule, reservedSeats, onCancel, onSubmit, currentU
           ))}
         </section>
 
-        {/* 🔐 개인정보 동의 섹션 */}
+        {/* 개인정보 동의 섹션 */}
         <section className="bg-gray-50 p-4 rounded-lg border border-gray-200 text-sm">
           <label className="flex items-start space-x-2 cursor-pointer">
             <input type="checkbox" checked={privacyAgreed} onChange={e => setPrivacyAgreed(e.target.checked)} required className="mt-1 rounded text-red-600 focus:ring-red-600 w-4 h-4" />
@@ -404,27 +432,73 @@ function ApplicationForm({ schedule, reservedSeats, onCancel, onSubmit, currentU
   );
 }
 
-function AdminDashboard({ schedule, applications, reservedSeats, onUpdateStatus, onDelete }: any) {
+// ================== 관리자용 통합 대시보드 ==================
+
+function AdminDashboard({ schedule, applications, reservedSeats, onUpdateStatus, onUpdateBusNumber, onDelete, onUpdateMaxSeats, onManualAdd }: any) {
+  const [showManualAdd, setShowManualAdd] = useState(false);
+  const [manualData, setManualData] = useState({ name: '', phone: '', type: '왕복', location: '서울월드컵경기장', busNumber: '' });
+
+  const handleManualAddSubmit = () => {
+    if(!manualData.name || !manualData.phone) return alert('이름과 연락처를 입력해주세요.');
+    onManualAdd({ representative: manualData, companions: [], isMinor: false, isAdminAdd: true, busNumber: manualData.busNumber });
+    setShowManualAdd(false);
+    setManualData({ name: '', phone: '', type: '왕복', location: '서울월드컵경기장', busNumber: '' });
+  };
+
   return (
     <div className="space-y-6">
-      <div className="flex flex-col sm:flex-row justify-between items-center bg-black text-white p-4 rounded-xl border-l-4 border-red-600 shadow-md gap-4">
-        <h2 className="text-xl font-black flex items-center"><ShieldAlert className="mr-2 text-red-600" size={24} /> 관리자 대시보드</h2>
-        <div className="font-bold text-sm bg-gray-800 px-4 py-2 rounded">
-          총 탑승인원: <span className="text-red-500 text-lg">{reservedSeats}</span> / {schedule.max_seats}명
+      <div className="flex flex-col md:flex-row justify-between items-center bg-black text-white p-4 rounded-xl border-l-4 border-red-600 shadow-md gap-4">
+        <h2 className="text-xl font-black flex items-center"><ShieldAlert className="mr-2 text-red-600" size={24} /> 관리자 패널</h2>
+        <div className="flex gap-2 items-center flex-wrap">
+          <div className="font-bold text-sm bg-gray-800 px-4 py-2 rounded flex items-center gap-2">
+            탑승인원: <span className="text-red-500 text-lg">{reservedSeats}</span> / {schedule.max_seats}명
+            <button onClick={onUpdateMaxSeats} className="text-xs bg-gray-600 hover:bg-gray-500 px-2 py-1 rounded ml-2 flex items-center"><Edit2 size={12} className="mr-1"/> 배차 수정</button>
+          </div>
+          <button onClick={() => setShowManualAdd(!showManualAdd)} className="text-sm bg-red-600 hover:bg-red-700 px-4 py-2 rounded font-bold flex items-center"><UserPlus size={16} className="mr-1"/> 명단 직접 추가</button>
         </div>
       </div>
 
+      {showManualAdd && (
+        <div className="bg-red-50 border-2 border-red-200 rounded-xl p-4 shadow-inner">
+          <h3 className="font-bold text-red-700 mb-3 flex items-center"><UserPlus size={18} className="mr-2"/> 오프라인/별도 신청자 직접 추가</h3>
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+            <input type="text" value={manualData.name} onChange={e => setManualData({...manualData, name: e.target.value})} className="border p-2 rounded text-sm" placeholder="이름 (예: 홍길동)" />
+            <input type="text" value={manualData.phone} onChange={e => setManualData({...manualData, phone: formatPhoneNumber(e.target.value)})} maxLength={13} className="border p-2 rounded text-sm" placeholder="연락처" />
+            <select value={manualData.type} onChange={e => setManualData({...manualData, type: e.target.value})} className="border p-2 rounded text-sm bg-white"><option value="왕복">왕복</option><option value="상행(서울행)">상행(서울행)</option><option value="하행(원정행)">하행(원정행)</option></select>
+            <input type="number" value={manualData.busNumber} onChange={e => setManualData({...manualData, busNumber: e.target.value})} className="border p-2 rounded text-sm" placeholder="호차 (숫자만, 예: 1)" />
+            <button onClick={handleManualAddSubmit} className="bg-black text-white font-bold rounded py-2 text-sm hover:bg-gray-800">추가하기</button>
+          </div>
+        </div>
+      )}
+
       <div className="bg-white rounded-xl shadow-md border border-gray-200 overflow-hidden">
-        <div className="p-4 bg-gray-50 border-b flex justify-between font-bold text-gray-800">{schedule.title} 신청자 관리</div>
+        <div className="p-4 bg-gray-50 border-b flex justify-between font-bold text-gray-800">{schedule.title} 통합 명단 관리</div>
         <div className="overflow-x-auto">
           <table className="w-full text-sm text-left whitespace-nowrap">
             <thead className="bg-gray-100 text-gray-600 border-b">
-              <tr><th className="p-3">상태/유형</th><th className="p-3">신청자 정보 (대표 및 동반자)</th><th className="p-3">환불계좌 (대기자)</th><th className="p-3 text-center">승인/관리</th></tr>
+              <tr>
+                <th className="p-3 w-20 text-center">호차 배정</th>
+                <th className="p-3">상태/유형</th>
+                <th className="p-3">신청자 정보 (대표 및 동반자)</th>
+                <th className="p-3 text-center">승인/관리</th>
+              </tr>
             </thead>
             <tbody>
               {applications.length === 0 ? <tr><td colSpan={4} className="p-8 text-center text-gray-400">신청자가 없습니다.</td></tr> :
                 applications.map((app: any) => (
                   <tr key={app.id} className="border-b hover:bg-gray-50">
+                    <td className="p-3 text-center align-top border-r bg-gray-50">
+                      <div className="flex flex-col items-center gap-1">
+                        <span className="text-xs font-bold text-gray-500">호차 입력</span>
+                        <input 
+                          type="number" 
+                          defaultValue={app.bus_number || ''} 
+                          onBlur={(e) => onUpdateBusNumber(app.id, e.target.value)}
+                          className="w-16 p-1 text-center border rounded font-black text-red-600 focus:ring-red-600 bg-white shadow-sm"
+                          placeholder="미정"
+                        />
+                      </div>
+                    </td>
                     <td className="p-3 align-top">
                       <div className="flex flex-col gap-1 items-start">
                         <span className={`px-2 py-1 text-xs rounded font-bold ${app.status === '입금완료' ? 'bg-green-100 text-green-700' : app.status === '취소요청' ? 'bg-red-100 text-red-700' : 'bg-yellow-100 text-yellow-700'}`}>{app.status}</span>
@@ -437,6 +511,7 @@ function AdminDashboard({ schedule, applications, reservedSeats, onUpdateStatus,
                         [대표] {app.rep_name} <span className="text-gray-500 font-normal text-sm ml-2">📞 {app.rep_phone}</span>
                         <div className="text-xs text-gray-500 font-normal mt-1">{app.boarding_type} / 탑승지: {app.boarding_location}</div>
                         {app.is_minor && <div className="text-xs text-orange-600 font-normal mt-1">보호자: {app.guardian_phone}</div>}
+                        {app.refund_account && <div className="text-xs text-blue-600 font-normal mt-1">💰 {app.refund_account}</div>}
                       </div>
                       
                       {app.companion_count > 0 && (
@@ -451,14 +526,11 @@ function AdminDashboard({ schedule, applications, reservedSeats, onUpdateStatus,
                         </div>
                       )}
                     </td>
-                    <td className="p-3 text-xs text-blue-600 align-top">
-                      {app.refund_account ? `💰 ${app.refund_account}` : '-'}
-                    </td>
                     <td className="p-3 text-center space-y-2 align-top">
-                       <select value={app.status} onChange={(e) => onUpdateStatus(app.id, e.target.value)} className="border text-xs p-1 rounded w-full bg-white focus:ring-red-600 focus:border-red-600">
+                       <select value={app.status} onChange={(e) => onUpdateStatus(app.id, e.target.value)} className="border text-xs p-1 rounded w-full bg-white focus:ring-red-600">
                          <option value="입금대기">입금대기</option><option value="입금완료">입금완료</option><option value="취소요청">취소요청</option><option value="환불완료">환불완료</option>
                        </select>
-                       <button onClick={() => onDelete(app.id)} className="text-xs text-red-500 hover:text-red-700 bg-red-50 px-2 py-1 rounded w-full">DB 완전삭제</button>
+                       <button onClick={() => onDelete(app.id)} className="text-xs text-red-500 hover:text-red-700 bg-red-50 px-2 py-1 rounded w-full">DB 삭제</button>
                     </td>
                   </tr>
                 ))
