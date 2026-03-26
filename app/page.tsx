@@ -12,7 +12,6 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 type UserRole = 'user' | 'auth_user' | 'admin';
 type User = { role: UserRole; name: string } | null;
 
-// 연락처 자동 하이픈 생성 및 숫자만 입력받는 함수
 const formatPhoneNumber = (value: string) => {
   const numbers = value.replace(/[^\d]/g, ''); 
   if (numbers.length <= 3) return numbers;
@@ -25,11 +24,12 @@ export default function App() {
   const [view, setView] = useState<'home' | 'applyForm' | 'adminDashboard'>('home');
   const [schedule, setSchedule] = useState<any>(null);
   const [applications, setApplications] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
+  
+  const [dataLoading, setDataLoading] = useState(true);
+  const [authLoading, setAuthLoading] = useState(true); // SSO 인증 로딩 상태
 
-  // 2. DB에서 데이터 불러오기
   const fetchData = async () => {
-    setLoading(true);
+    setDataLoading(true);
     const { data: matchData } = await supabase.from('matches').select('*').eq('status', 'OPEN').order('created_at', { ascending: false }).limit(1).single();
     
     if (matchData) {
@@ -37,32 +37,74 @@ export default function App() {
       const { data: resData } = await supabase.from('reservations').select('*').eq('match_id', matchData.id);
       if (resData) setApplications(resData);
     }
-    setLoading(false);
+    setDataLoading(false);
   };
 
+  // 🔒 2. 대망의 SSO 티켓 검증 로직
   useEffect(() => {
-    fetchData();
+    const verifyTicket = async () => {
+      const urlParams = new URLSearchParams(window.location.search);
+      const ticket = urlParams.get('ticket');
+
+      if (!ticket) {
+        setAuthLoading(false); // 티켓이 없으면 인증 실패 (접근 거부 화면 노출)
+        return; 
+      }
+
+      // 🛠️ [개발자 테스트용 코드] 실제 API가 완성되기 전 테스트를 위한 만능 티켓
+      if (ticket === 'test_admin') {
+        setCurrentUser({ role: 'admin', name: '테스트관리자' });
+        setView('adminDashboard');
+        setAuthLoading(false);
+        window.history.replaceState({}, document.title, window.location.pathname); // 주소창 티켓 삭제
+        return;
+      }
+      if (ticket === 'test_user') {
+        setCurrentUser({ role: 'auth_user', name: '테스트정회원' });
+        setView('home');
+        setAuthLoading(false);
+        window.history.replaceState({}, document.title, window.location.pathname);
+        return;
+      }
+
+      // 🚀 [실제 서비스용 코드] 본진 서버(fcseoul12.com) API와 통신
+      try {
+        const response = await fetch('https://fcseoul12.com/api/sso/verify-ticket', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ticket: ticket, secret_key: 'FCSeoul_Bus_2026_Secret!' })
+        });
+
+        const result = await response.json();
+
+        if (result.status === 'success') {
+          setCurrentUser({ name: result.data.nickname, role: result.data.role as UserRole });
+          setView(result.data.role === 'admin' ? 'adminDashboard' : 'home');
+          window.history.replaceState({}, document.title, window.location.pathname); // 1회용 티켓 흔적 지우기
+        } else {
+          alert('로그인 정보가 만료되었습니다. 수호신 홈페이지에서 다시 접속해주세요.');
+        }
+      } catch (error) {
+        // 현재는 API가 없으므로 무조건 여기로 빠집니다 (테스트용 콘솔 에러만 출력)
+        console.error('인증 API 대기중...');
+      } finally {
+        setAuthLoading(false);
+      }
+    };
+
+    fetchData().then(() => verifyTicket());
   }, []);
 
-  // 총 예약된 좌석 수 (취소/환불 포함하여 카운트 -> 관리자가 수동으로 대기자 처리)
   const totalReservedSeats = applications.reduce((total, app) => total + 1 + (app.companion_count || 0), 0);
-
-  const handleLogin = (role: UserRole, name: string) => {
-    setCurrentUser({ role, name });
-    setView(role === 'admin' ? 'adminDashboard' : 'home');
-  };
 
   const handleLogout = () => {
     setCurrentUser(null);
-    setView('home');
+    window.location.href = 'https://fcseoul12.com'; // 로그아웃 시 본진으로 돌려보냄
   };
 
-  // 3. DB에 탑승 신청 데이터 저장하기
   const submitApplication = async (applicationData: any) => {
-    // 수정: DB 컬럼명인 max_seats로 변경
     const isWaiting = totalReservedSeats >= schedule.max_seats; 
     
-    // 일반 신청인데 빈자리가 부족한 경우 방지
     if (!isWaiting && totalReservedSeats + 1 + applicationData.companions.length > schedule.max_seats) {
         alert(`현재 잔여 좌석이 ${schedule.max_seats - totalReservedSeats}석밖에 남지 않아 신청 인원 전체가 대기자로 넘어갑니다.`);
     }
@@ -79,7 +121,7 @@ export default function App() {
       is_minor: applicationData.isMinor,
       guardian_phone: applicationData.guardianPhone,
       refund_account: applicationData.refundAccount || null,
-      is_waiting: totalReservedSeats >= schedule.max_seats, // 수정됨
+      is_waiting: totalReservedSeats >= schedule.max_seats,
       status: '입금대기'
     };
 
@@ -106,22 +148,19 @@ export default function App() {
     }
   };
 
-  if (loading) return <div className="min-h-screen bg-gray-100 flex items-center justify-center font-bold text-xl">데이터를 불러오는 중입니다...</div>;
+  if (dataLoading || authLoading) return <div className="min-h-screen bg-black flex items-center justify-center font-bold text-xl text-red-600">수호신 인증 정보를 확인 중입니다...</div>;
 
+  // ⛔ 티켓 없이 접속한 사람을 쫓아내는 철통 방어 화면
   if (!currentUser) {
     return (
       <div className="min-h-screen bg-black flex items-center justify-center p-4">
         <div className="bg-white p-8 rounded-xl shadow-2xl max-w-md w-full text-center border-t-8 border-red-600">
-          <div className="flex justify-center mb-4">
-            <img src="/logo.png" alt="FC Seoul" className="w-16 h-16 object-contain" onError={(e) => e.currentTarget.style.display = 'none'} />
-          </div>
-          <h1 className="text-2xl font-black mb-2 text-black tracking-tight">수호신 원정버스 시스템</h1>
-          <p className="text-gray-500 mb-8 text-sm">테스트를 위해 역할을 선택해주세요.</p>
-          <div className="space-y-3">
-            <button onClick={() => handleLogin('user', '일반수호신')} className="w-full py-3 px-4 border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-700 font-bold transition-colors">일반회원 로그인</button>
-            <button onClick={() => handleLogin('auth_user', '인증수호신')} className="w-full py-3 px-4 bg-red-50 text-red-600 border border-red-600 rounded-lg hover:bg-red-100 font-bold transition-colors">인증회원 로그인 (우선예매)</button>
-            <button onClick={() => handleLogin('admin', '최고관리자')} className="w-full py-3 px-4 bg-black text-white rounded-lg hover:bg-gray-900 font-bold transition-colors mt-4 border border-gray-700">관리자 로그인</button>
-          </div>
+          <div className="flex justify-center mb-4"><ShieldAlert size={48} className="text-red-600" /></div>
+          <h1 className="text-2xl font-black mb-2 text-black">접근 권한 없음</h1>
+          <p className="text-gray-500 mb-8 text-sm">정상적인 접근이 아닙니다.<br/>수호신 홈페이지를 통해 로그인 후 접속해주세요.</p>
+          <a href="https://fcseoul12.com" className="block w-full py-3 px-4 bg-red-600 text-white rounded-lg hover:bg-red-700 font-bold transition-colors">
+            수호신 홈페이지로 돌아가기
+          </a>
         </div>
       </div>
     );
@@ -140,7 +179,7 @@ export default function App() {
               {currentUser.name} ({currentUser.role === 'admin' ? '관리자' : currentUser.role === 'auth_user' ? '인증회원' : '일반회원'})
             </span>
             <button onClick={handleLogout} className="flex items-center space-x-1 hover:text-red-500 text-sm transition-colors">
-              <LogOut size={16} /> <span>로그아웃</span>
+              <LogOut size={16} /> <span>돌아가기</span>
             </button>
           </div>
         </div>
@@ -164,7 +203,6 @@ export default function App() {
 // ================== 컴포넌트 분리 ==================
 
 function UserHome({ schedule, reservedSeats, onApplyClick, currentUser, applications, onCancelRequest }: any) {
-  // 수정: DB 컬럼명인 max_seats로 변경
   const isSoldOut = reservedSeats >= schedule.max_seats; 
   const myApplications = applications.filter((app: any) => app.user_id === currentUser.name);
 
@@ -241,21 +279,21 @@ function UserHome({ schedule, reservedSeats, onApplyClick, currentUser, applicat
 }
 
 function ApplicationForm({ schedule, reservedSeats, onCancel, onSubmit, currentUser }: any) {
-  // 수정: DB 컬럼명인 max_seats로 변경
   const isSoldOut = reservedSeats >= schedule.max_seats; 
   const [rep, setRep] = useState({ name: '', phone: '', type: '왕복', location: '서울월드컵경기장' });
   const [companions, setCompanions] = useState<any[]>([]);
   const [isMinor, setIsMinor] = useState(false);
   const [guardianPhone, setGuardianPhone] = useState('');
   const [refundAccount, setRefundAccount] = useState('');
+  const [privacyAgreed, setPrivacyAgreed] = useState(false); // 🔐 개인정보 동의 상태
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if(!rep.name || !rep.phone) return alert('대표자 정보를 입력해주세요.');
     if(rep.phone.length < 12) return alert('올바른 연락처를 입력해주세요.'); 
     if(isMinor && !guardianPhone) return alert('미성년자는 보호자 연락처를 반드시 입력해야 합니다.');
-    
     if(isSoldOut && !refundAccount) return alert('대기자 배차 및 환불 처리를 위한 계좌번호를 입력해주세요.');
+    if(!privacyAgreed) return alert('개인정보 수집 및 이용에 동의해야 신청이 가능합니다.');
 
     onSubmit({ representative: rep, companions, isMinor, guardianPhone, refundAccount });
   };
@@ -337,6 +375,21 @@ function ApplicationForm({ schedule, reservedSeats, onCancel, onSubmit, currentU
                </div>
              </div>
           ))}
+        </section>
+
+        {/* 🔐 개인정보 동의 섹션 */}
+        <section className="bg-gray-50 p-4 rounded-lg border border-gray-200 text-sm">
+          <label className="flex items-start space-x-2 cursor-pointer">
+            <input type="checkbox" checked={privacyAgreed} onChange={e => setPrivacyAgreed(e.target.checked)} required className="mt-1 rounded text-red-600 focus:ring-red-600 w-4 h-4" />
+            <span className="text-gray-700">
+              <strong>[필수] 개인정보 수집 및 이용 동의</strong><br/>
+              <span className="text-xs text-gray-500">
+                1. 수집목적: 수호신 원정버스 탑승자 식별, 비상연락 및 환불 처리<br/>
+                2. 수집항목: 성명, 연락처, 환불계좌 (필요 시 보호자 연락처)<br/>
+                3. 보유기간: <strong>해당 원정 경기 종료 및 정산 완료 후 즉시 파기</strong>
+              </span>
+            </span>
+          </label>
         </section>
 
         <div className="bg-black p-4 rounded-lg flex justify-between items-center text-white">
